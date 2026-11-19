@@ -19,19 +19,18 @@ import java.util.Locale
 class Picazor : HttpSource() {
 
     override val name = "Picazor"
-    override val baseUrl = "https://picazor.com/"
+    override val baseUrl = "https://picazor.com"
     override val lang = "es"
     override val supportsLatest = true
     override val versionId = 1
 
-    // Si tu extensions-lib usa el método antiguo, cambia por: override fun getNsfw() = true
     override val isNsfw = true
 
     private val localePrefix = "$baseUrl/es"
-    private val creatorUrlRegex = Regex("""^https://picazor/.com/es/[%5E/#]+$""")
-    private val photoUrlRegex = Regex("""^https://picazor/.com/es/[%5E/#]+/\d+$""")
+    private val creatorUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+$""")
+    private val photoUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+/\d+$""")
     private val sizePrefixRegex = Regex("""/\d+px_""")
-    private val contentUrlRegex = Regex(""""contentUrl"\s:\s"([^"]+)"""")
+    private val contentUrlRegex = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
     private val albumIdRegex = Regex("""/albums/(\d+)$""")
     private val spanishDateRegex = Regex("""(\d{1,2}) de (\w+) de (\d{4})""")
     private val dateFormat = SimpleDateFormat("d 'de' MMMM 'de' yyyy", Locale("es", "ES"))
@@ -51,11 +50,12 @@ class Picazor : HttpSource() {
     override fun imageRequest(page: Page): Request {
         val imageHeaders = headers.newBuilder()
             .set("Referer", "$localePrefix/")
-            .set("Accept", "image/avif,image/webp,image/apng,image/,/*;q=0.8")
+            .set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
             .build()
         return GET(page.imageUrl!!, imageHeaders)
     }
-// ------------------------------------------------------------------ Popular
+
+    // ------------------------------------------------------------------ Popular
 
     override fun popularMangaRequest(page: Int): Request =
         GET("$baseUrl/es/creators/top/$page", headers)
@@ -77,7 +77,8 @@ class Picazor : HttpSource() {
 
     override fun searchMangaParse(response: Response): MangasPage =
         parseCreators(response.asJsoup(), response.request.url.toString())
-        private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
+
+    private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
         val isFirstPage = !pageUrl.contains(Regex("""/(page|top)/\d+$"""))
 
         val entries = doc.select("#main-content a[href]")
@@ -101,10 +102,11 @@ class Picazor : HttpSource() {
                 }
             }
             .distinctBy { it.url }
-            val hasNext = if (entries.isEmpty()) {
+
+        val hasNext = if (entries.isEmpty()) {
             false
         } else {
-            isFirstPage  doc.selectFirst("#main-content a[rel=next]") != null 
+            isFirstPage || doc.selectFirst("#main-content a[rel=next]") != null ||
                 doc.select("#main-content a[href]").any { it.absHref().contains(Regex("""/(page|top)/\d+$""")) }
         }
 
@@ -125,8 +127,8 @@ class Picazor : HttpSource() {
             this.title = title
             author = handle
             artist = handle
-            thumbnail_url = scope.selectFirst("img[src="/images/profiles/"]")?.absSrc()
-            genre = scope.select("a[href="/tags/a/"]")
+            thumbnail_url = scope.selectFirst("img[src*=\"/images/profiles/\"]")?.absSrc()
+            genre = scope.select("a[href*=\"/tags/\"]")
                 .map { it.text().trim() }
                 .filter { it.isNotEmpty() }
                 .distinct()
@@ -140,7 +142,8 @@ class Picazor : HttpSource() {
             initialized = true
         }
     }
-// ----------------------------------------------------------------- Capítulos
+
+    // ----------------------------------------------------------------- Capítulos
 
     override fun chapterListRequest(manga: SManga): Request =
         GET(baseUrl + manga.url + "/albums", headers)
@@ -164,13 +167,14 @@ class Picazor : HttpSource() {
 
         Observable.just(chapters.distinctBy { it.url })
     }
-override fun chapterListParse(response: Response): List<SChapter> =
+
+    override fun chapterListParse(response: Response): List<SChapter> =
         parseChapters(response.asJsoup(), null)
 
     private fun parseChapters(doc: Document, manga: SManga?): List<SChapter> {
         val scope = doc.selectFirst("#main-content") ?: return emptyList()
 
-        return scope.select("a[href*="/albums/"]")
+        return scope.select("a[href*=\"/albums/\"]")
             .mapNotNull { anchor ->
                 val url = anchor.absHref().substringBefore('#').substringBefore('?')
                 val albumId = albumIdRegex.find(url)?.groupValues?.get(1) ?: return@mapNotNull null
@@ -190,9 +194,10 @@ override fun chapterListParse(response: Response): List<SChapter> =
     private fun parseSpanishDate(text: String): Long {
         val match = spanishDateRegex.find(text) ?: return 0L
         val (day, month, year) = match.destructured
-        return runCatching { dateFormat.parse("$day de $month de $year")?.time ?: 0L }.getOrDefault(0L)
+        return runCatching { dateFormat.parse("$day de $month de$year")?.time ?: 0L }.getOrDefault(0L)
     }
-// ------------------------------------------------------------------- Páginas
+
+    // ------------------------------------------------------------------- Páginas
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.defer {
         val albumUrl = baseUrl + chapter.url
@@ -209,7 +214,7 @@ override fun chapterListParse(response: Response): List<SChapter> =
             photos.mapNotNull { anchor ->
                 runCatching {
                     client.newCall(GET(anchor.absHref(), headers)).execute().use { r ->
-                        contentUrlRegex.find(r.body?.string().orEmpty())?.groupValues?.get(1)
+                        contentUrlRegex.find(r.body.string())?.groupValues?.get(1)
                     }
                 }.getOrNull()
             }.distinct().reversed()
@@ -234,17 +239,11 @@ override fun chapterListParse(response: Response): List<SChapter> =
             .filter { photoUrlRegex.matches(it.absHref().substringBefore('#').substringBefore('?')) }
             .filter { it.selectFirst("img") != null }
     }
-override fun getFilterList(): FilterList = FilterList()
+
+    override fun getFilterList(): FilterList = FilterList()
 
     private fun Element.absHref(): String = absolutize(attr("href"))
 
     private fun Element.absSrc(): String = absolutize(attr("src"))
 
-    private fun absolutize(value: String): String = when {
-        value.isBlank() -> ""
-        value.startsWith("http") -> value
-        value.startsWith("//") -> "https:$value"
-        value.startsWith("/") -> baseUrl + value
-        else -> "$baseUrl/$value"
-    }
-}
+    private fun absolutize(value:
