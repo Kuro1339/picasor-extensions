@@ -78,21 +78,32 @@ abstract class Picazor : KeiSource() {
         val entries = container.select("a[href]")
             .filter { it.closest(".breadcrumbs") == null }
             .mapNotNull { anchor ->
-                val img = anchor.selectFirst("img") ?: return@mapNotNull null
                 val raw = anchor.absHref().substringBefore('#').substringBefore('?')
                 val creatorUrl = raw.replace(albumIdRegex, "")
                 if (!creatorUrlRegex.matches(creatorUrl)) return@mapNotNull null
                 if (creatorUrl.substringAfterLast('/') in reservedSegments) return@mapNotNull null
-                val title = img.attr("alt")
-                    .substringBefore(" - ")
-                    .ifBlank { anchor.text() }
-                    .trim()
+
+                val card = anchor.closest("[class*=group/post]")
+                    ?: anchor.closest("article")
+                    ?: anchor.parent()
+
+                val nameSpan = anchor.selectFirst("[data-album-post-name]")?.text()?.trim()
+                val imgAlt = anchor.selectFirst("img")?.attr("alt")?.substringBefore(" - ")?.trim()
+                val title = nameSpan
+                    ?.takeIf { it.isNotBlank() }
+                    ?: imgAlt?.takeIf { it.isNotBlank() }
+                    ?: anchor.text().trim()
+
                 if (title.isBlank()) return@mapNotNull null
+
+                val thumb = card?.selectFirst("a[href*=/albums/] img")?.absSrc()?.takeIf { it.isNotBlank() }
+                    ?: card?.selectFirst("img")?.absSrc()?.takeIf { it.isNotBlank() }
+                    ?: anchor.selectFirst("img")?.absSrc()
 
                 SManga.create().apply {
                     setUrlWithoutDomain(creatorUrl.substringAfter(siteRoot))
                     this.title = title
-                    thumbnail_url = img.absSrc()
+                    thumbnail_url = thumb
                 }
             }
             .distinctBy { it.url }
