@@ -15,7 +15,3 @@ keiyoushi {
         baseUrl = "https://picazor.com"
     }
 }
-
-dependencies {
-    implementation(project(":lib"))
-}
