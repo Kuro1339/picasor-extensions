@@ -13,6 +13,7 @@ import keiyoushi.source.KeiSource
 import keiyoushi.utils.runWebView
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import org.json.JSONObject
 import org.json.JSONTokener
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -58,10 +59,10 @@ abstract class Picazor : KeiSource() {
             loadUrl(url)
 
             var ticks = 0
+            val quotedSelector = JSONObject.quote(readySelector)
             val checkJs = """
                 (() => {
-                    const selector = ${org.json.JSONObject.quote(readySelector)};
-                    const el = document.querySelector(selector);
+                    const el = document.querySelector($quotedSelector);
                     const hasText = document.body && document.body.innerText && document.body.innerText.trim().length > 80;
                     if (el && hasText) return document.documentElement.outerHTML;
                     return null;
@@ -309,7 +310,7 @@ abstract class Picazor : KeiSource() {
     private fun parseSpanishDate(text: String): Long {
         val match = spanishDateRegex.find(text) ?: return 0L
         val (day, month, year) = match.destructured
-        return runCatching { dateFormat.parse("$day de $month de$year")?.time ?: 0L }.getOrDefault(0L)
+        return runCatching { dateFormat.parse("$day de $month de $year")?.time ?: 0L }.getOrDefault(0L)
     }
 
     // ------------------------------------------------------------------- Páginas
@@ -350,3 +351,9 @@ abstract class Picazor : KeiSource() {
 
     private fun absolutize(value: String): String = when {
         value.isBlank() -> ""
+        value.startsWith("http") -> value
+        value.startsWith("//") -> "https:$value"
+        value.startsWith("/") -> siteRoot + value
+        else -> "$siteRoot/$value"
+    }
+}
