@@ -1,33 +1,30 @@
 package eu.kanade.tachiyomi.extension.es.picazor
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asJsoup
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
 import keiyoushi.source.KeiSource
-import okhttp3.Request
-import okhttp3.Response
+import keiyoushi.utils.asJsoup
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-class Picazor(
-    override val lang: String,
-    override val id: Long,
-) : KeiSource() {
+abstract class Picazor : KeiSource() {
 
     override val name = "Picazor"
     override val baseUrl = "https://picazor.com"
     override val supportsLatest = true
-
-    override val isNsfw = true
 
     private val localePrefix = "$baseUrl/es"
     private val creatorUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+$""")
@@ -50,31 +47,28 @@ class Picazor(
 
     override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
 
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headers.newBuilder()
-            .set("Referer", "$localePrefix/")
-            .set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-            .build()
-        return GET(page.imageUrl!!, imageHeaders)
-    }
-
     // ------------------------------------------------------------------ Popular
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/es/creators/top/$page", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val doc = client.get("$baseUrl/es/creators/top/$page", Fetch.DOCUMENT).asJsoup()
+        return parseCreators(doc, "$baseUrl/es/creators/top/$page")
+    }
 
     // ------------------------------------------------------------------- Latest
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$localePrefix/page/$page", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val url = "$localePrefix/page/$page"
+        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        return parseCreators(doc, url)
+    }
 
     // ------------------------------------------------------------------- Search
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = GET("$localePrefix/search/${query.trim()}", headers)
-
-    override fun searchMangaParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = "$localePrefix/search/${query.trim()}"
+        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        return parseCreators(doc, url)
+    }
 
     private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
         val isFirstPage = !pageUrl.contains(Regex("""/(page|top)/\d+$"""))
@@ -111,17 +105,42 @@ class Picazor(
         return MangasPage(entries, hasNext)
     }
 
-    // ------------------------------------------------------------------ Detalles
+    // --------------------------------------------------------- Detalles y Capítulos
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val doc = response.asJsoup()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val detailsDeferred = async {
+            if (fetchDetails) {
+                val doc = client.get(baseUrl + manga.url, Fetch.DOCUMENT).asJsoup()
+                parseMangaDetails(doc, manga)
+            } else {
+                manga
+            }
+        }
+        val chaptersDeferred = async {
+            if (fetchChapters) {
+                fetchAllChapters(manga)
+            } else {
+                chapters
+            }
+        }
+        SMangaUpdate(detailsDeferred.await(), chaptersDeferred.await())
+    }
+
+    private fun parseMangaDetails(doc: Document, manga: SManga): SManga {
         val scope = doc.selectFirst("#main-content") ?: doc
 
         val title = scope.selectFirst("h1")?.text()?.trim()
             ?: throw Exception("Creador no encontrado")
         val handle = scope.selectFirst("[data-file-auxnames] bdi")?.text()?.trim()
         val onlyfans = scope.selectFirst("a[href^=https://onlyfans.com]")?.absHref()
+
         return SManga.create().apply {
+            url = manga.url
             this.title = title
             author = handle
             artist = handle
@@ -141,18 +160,14 @@ class Picazor(
         }
     }
 
-    // ----------------------------------------------------------------- Capítulos
-
-    override fun chapterListRequest(manga: SManga): Request = GET(baseUrl + manga.url + "/albums", headers)
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.defer {
-        val chapters = mutableListOf<SChapter>()
+    private suspend fun fetchAllChapters(manga: SManga): List<SChapter> {
+        val result = mutableListOf<SChapter>()
         var nextUrl: String? = baseUrl + manga.url + "/albums"
         var pages = 0
 
         while (nextUrl != null && pages++ < 100) {
-            val doc = client.newCall(GET(nextUrl, headers)).execute().use { it.asJsoup() }
-            chapters += parseChapters(doc, manga)
+            val doc = client.get(nextUrl, Fetch.DOCUMENT).asJsoup()
+            result += parseChapters(doc, manga)
 
             nextUrl = doc.selectFirst("#main-content a[rel=next]")?.absHref()
                 ?: doc.select("#main-content a[href]")
@@ -162,12 +177,10 @@ class Picazor(
                     ?.absHref()
         }
 
-        Observable.just(chapters.distinctBy { it.url })
+        return result.distinctBy { it.url }
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> = parseChapters(response.asJsoup(), null)
-
-    private fun parseChapters(doc: Document, manga: SManga?): List<SChapter> {
+    private fun parseChapters(doc: Document, manga: SManga): List<SChapter> {
         val scope = doc.selectFirst("#main-content") ?: return emptyList()
 
         return scope.select("a[href*=\"/albums/\"]")
@@ -179,9 +192,8 @@ class Picazor(
                     setUrlWithoutDomain(url.substringAfter(baseUrl))
                     name = "Álbum #$albumId"
                     chapter_number = albumId.toFloatOrNull() ?: -1f
-                    thumbnail_url = anchor.selectFirst("img")?.absSrc()
                     date_upload = parseSpanishDate(scope.text())
-                    scanlator = manga?.title
+                    scanlator = manga.title
                 }
             }
             .distinctBy { it.url }
@@ -195,9 +207,9 @@ class Picazor(
 
     // ------------------------------------------------------------------- Páginas
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.defer {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val albumUrl = baseUrl + chapter.url
-        val doc = client.newCall(GET(albumUrl, headers)).execute().use { it.asJsoup() }
+        val doc = client.get(albumUrl, Fetch.DOCUMENT).asJsoup()
         val photos = photoAnchors(doc)
 
         val derived = photos.mapNotNull { anchor ->
@@ -209,24 +221,13 @@ class Picazor(
         } else {
             photos.mapNotNull { anchor ->
                 runCatching {
-                    client.newCall(GET(anchor.absHref(), headers)).execute().use { r ->
-                        contentUrlRegex.find(r.body.string())?.groupValues?.get(1)
-                    }
+                    val body = client.get(anchor.absHref(), Fetch.DOCUMENT).body.string()
+                    contentUrlRegex.find(body)?.groupValues?.get(1) ?: Jsoup.parse(body).baseUri().takeIf { false }
                 }.getOrNull()
             }.distinct().reversed()
         }
 
-        Observable.just(urls.mapIndexed { index, url -> Page(index, chapter.url, url) })
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val urls = photoAnchors(response.asJsoup())
-            .mapNotNull { it.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "") }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .reversed()
-
-        return urls.mapIndexed { index, url -> Page(index, response.request.url.toString(), url) }
+        return urls.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
 
     private fun photoAnchors(doc: Document): List<Element> {
@@ -235,8 +236,6 @@ class Picazor(
             .filter { photoUrlRegex.matches(it.absHref().substringBefore('#').substringBefore('?')) }
             .filter { it.selectFirst("img") != null }
     }
-
-    override fun getFilterList(): FilterList = FilterList()
 
     private fun Element.absHref(): String = absolutize(attr("href"))
 
