@@ -73,8 +73,9 @@ abstract class Picazor : KeiSource() {
 
     private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
         val isFirstPage = !pageUrl.contains(Regex("""/page/\d+$"""))
+        val container = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
 
-        val entries = doc.select("#main-content a[href]")
+        val entries = container.select("a[href]")
             .filter { it.closest(".breadcrumbs") == null }
             .mapNotNull { anchor ->
                 val img = anchor.selectFirst("img") ?: return@mapNotNull null
@@ -99,8 +100,8 @@ abstract class Picazor : KeiSource() {
         val hasNext = if (entries.isEmpty()) {
             false
         } else {
-            isFirstPage || doc.selectFirst("#main-content a[rel=next]") != null ||
-                doc.select("#main-content a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
+            isFirstPage || container.selectFirst("a[rel=next]") != null ||
+                container.select("a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
         }
 
         return MangasPage(entries, hasNext)
@@ -133,7 +134,7 @@ abstract class Picazor : KeiSource() {
     }
 
     private fun parseMangaDetails(doc: Document, manga: SManga): SManga {
-        val scope = doc.selectFirst("#main-content") ?: doc
+        val scope = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
 
         val title = scope.selectFirst("h1")?.text()?.trim()
             ?: throw Exception("Creador no encontrado")
@@ -170,8 +171,8 @@ abstract class Picazor : KeiSource() {
             val doc = client.get(nextUrl, Fetch.DOCUMENT).asJsoup()
             result += parseChapters(doc, manga)
 
-            nextUrl = doc.selectFirst("#main-content a[rel=next]")?.absHref()
-                ?: doc.select("#main-content a[href]")
+            nextUrl = doc.selectFirst("a[rel=next]")?.absHref()
+                ?: doc.select("a[href]")
                     .firstOrNull {
                         it.text().trim().startsWith("Sig") && it.absHref().contains("/albums")
                     }
@@ -182,7 +183,7 @@ abstract class Picazor : KeiSource() {
     }
 
     private fun parseChapters(doc: Document, manga: SManga): List<SChapter> {
-        val scope = doc.selectFirst("#main-content") ?: return emptyList()
+        val scope = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: return emptyList()
 
         return scope.select("a[href*=\"/albums/\"]")
             .mapNotNull { anchor ->
@@ -232,7 +233,7 @@ abstract class Picazor : KeiSource() {
     }
 
     private fun photoAnchors(doc: Document): List<Element> {
-        val scope = doc.selectFirst("#main-content") ?: return emptyList()
+        val scope = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: return emptyList()
         return scope.select("a[href]")
             .filter { photoUrlRegex.matches(it.absHref().substringBefore('#').substringBefore('?')) }
             .filter { it.selectFirst("img") != null }
