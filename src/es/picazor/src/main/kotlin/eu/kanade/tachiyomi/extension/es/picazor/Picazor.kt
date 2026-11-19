@@ -7,8 +7,8 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.source.KeiSource
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
@@ -18,7 +18,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-class Picazor : HttpSource() {
+class Picazor : KeiSource() {
 
     override val name = "Picazor"
     override val baseUrl = "https://picazor.com"
