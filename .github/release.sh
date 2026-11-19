@@ -14,7 +14,7 @@ sed -i -E "s/versionCode = [0-9]+/versionCode = $CODE/" "$F"
 sed -i -E "s/versionName = \"[^\"]+\"/versionName = \"$VER\"/" "$F"
 
 chmod +x gradlew
-./gradlew :src:es:picazor:assembleRelease -x lint -x ktlintCheck
+./gradlew :src:es:picazor:assembleRelease -x lint
 
 echo "$KEYSTORE_BASE64" | base64 -d > /tmp/ks.jks
 APK=$(find src/es/picazor/build/outputs/apk/release -name '*.apk' | head -n1)
