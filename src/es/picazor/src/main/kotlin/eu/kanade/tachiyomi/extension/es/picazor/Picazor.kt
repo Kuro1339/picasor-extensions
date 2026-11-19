@@ -33,8 +33,10 @@ abstract class Picazor : KeiSource() {
     private val siteRoot = "https://picazor.com"
     private val photoUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+/\d+$""")
     private val sizePrefixRegex = Regex("""/\d+px_""")
+    private val videoThumbSuffixRegex = Regex("""\.(mp4|webm|m3u8)\.(jpe?g|png|webp)$""", RegexOption.IGNORE_CASE)
     private val contentUrlRegex = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
     private val albumIdRegex = Regex("""/albums/(\d+)$""")
+    private val pageParamRegex = Regex("""(?:/page/|[?&]page=)(\d+)""")
     private val spanishDateRegex = Regex("""(\d{1,2}) de (\w+) de (\d{4})""")
     private val mediaUrlRegex = Regex(
         """https?://[^\s"'<>\\]+\.(?:mp4|m3u8|webm|mpd)(?:\?[^\s"'<>\\]*)?""",
@@ -102,7 +104,7 @@ abstract class Picazor : KeiSource() {
     override suspend fun getPopularManga(page: Int): MangasPage {
         val url = if (page <= 1) "$baseUrl/hot" else "$baseUrl/hot/page/$page"
         val doc = fetchDocument(url)
-        return parseCreators(doc, url)
+        return parseCreators(doc, page)
     }
 
     // ------------------------------------------------------------------- Latest
@@ -110,7 +112,7 @@ abstract class Picazor : KeiSource() {
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = if (page <= 1) baseUrl else "$baseUrl/page/$page"
         val doc = fetchDocument(url)
-        return parseCreators(doc, url)
+        return parseCreators(doc, page)
     }
 
     // ------------------------------------------------------------------- Search
@@ -119,11 +121,10 @@ abstract class Picazor : KeiSource() {
         val encodedQuery = query.trim().replace(" ", "%20")
         val url = if (page <= 1) "$baseUrl/search/$encodedQuery" else "$baseUrl/search/$encodedQuery/page/$page"
         val doc = fetchDocument(url)
-        return parseCreators(doc, url)
+        return parseCreators(doc, page)
     }
 
-    private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
-        val isFirstPage = !pageUrl.contains(Regex("""/page/\d+$"""))
+    private fun parseCreators(doc: Document, currentPage: Int): MangasPage {
         val container = doc.selectFirst("[data-home-feed=\"true\"]")
             ?: doc.selectFirst("#main-content")
             ?: doc.selectFirst("main")
@@ -202,8 +203,16 @@ abstract class Picazor : KeiSource() {
             return MangasPage(listOf(debugItem), false)
         }
 
-        val hasNext = isFirstPage || container.selectFirst("a[rel=next]") != null ||
-            container.select("a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
+        val nextPage = currentPage + 1
+        val allLinks = doc.select("a[href]")
+        val hasNext = doc.selectFirst("a[rel=next]") != null ||
+            allLinks.any { anchor ->
+                val href = anchor.absHref()
+                val pageNum = pageParamRegex.find(href)?.groupValues?.get(1)?.toIntOrNull()
+                (pageNum != null && pageNum >= nextPage) ||
+                    anchor.text().trim().startsWith("Sig", ignoreCase = true)
+            } ||
+            (currentPage == 1 && rawEntries.size >= 10)
 
         return MangasPage(rawEntries, hasNext)
     }
@@ -327,18 +336,31 @@ abstract class Picazor : KeiSource() {
         )
         val photos = photoAnchors(doc)
 
-        val derived = photos.mapNotNull { anchor ->
-            anchor.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "/")
-        }.filter { it.isNotBlank() }.distinct().reversed()
+        val derivedImages = mutableListOf<String>()
+        val derivedVideos = mutableListOf<String>()
 
-        if (derived.isNotEmpty()) {
-            return derived.mapIndexed { index, url -> Page(index, imageUrl = url) }
+        for (anchor in photos) {
+            val rawSrc = anchor.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "/").orEmpty()
+            if (rawSrc.isBlank()) continue
+
+            if (videoThumbSuffixRegex.containsMatchIn(rawSrc)) {
+                val videoUrl = rawSrc.replace(videoThumbSuffixRegex, ".$1")
+                derivedVideos += videoUrl
+            } else {
+                derivedImages += rawSrc
+            }
         }
 
-        val videos = extractDirectVideos(doc)
-        if (videos.isNotEmpty()) {
+        val cleanImages = derivedImages.distinct().reversed()
+        if (cleanImages.isNotEmpty()) {
+            return cleanImages.mapIndexed { index, url -> Page(index, imageUrl = url) }
+        }
+
+        val allVideos = (derivedVideos + extractDirectVideos(doc)).distinct().reversed()
+        if (allVideos.isNotEmpty()) {
             throw Exception(
-                "Capítulo de video (no reproducible en el visor de imágenes). Enlace directo:\n${videos.first()}",
+                "Este capítulo contiene video (${allVideos.size}) y el lector solo muestra imágenes.\n" +
+                    "Abre en navegador/WebView o copia el enlace:\n${allVideos.first()}",
             )
         }
 
