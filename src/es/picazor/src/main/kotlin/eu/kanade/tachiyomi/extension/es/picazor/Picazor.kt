@@ -20,6 +20,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -60,8 +61,9 @@ abstract class Picazor : KeiSource() {
         url: String,
         readySelector: String = "article[data-album-post], [data-home-feed=\"true\"] a[href*=\"/albums/\"], #main-content a[href]",
         scrollTargetCount: Int = 0,
+        timeout: Duration = 15.seconds,
     ): Document {
-        val html = runWebView<String>(timeout = 45.seconds) {
+        val html = runWebView<String>(timeout = timeout) {
             blockImages = true
             loadUrl(url)
 
@@ -74,8 +76,9 @@ abstract class Picazor : KeiSource() {
                 (() => {
                     const selector = $quotedSelector;
                     const el = document.querySelector(selector);
-                    const hasText = document.body && document.body.innerText && document.body.innerText.trim().length > 80;
-                    const cardCount = document.querySelectorAll('article[data-album-post]').length;
+                    const hasText = document.body && document.body.innerText && document.body.innerText.trim().length > 60;
+                    const cards = document.querySelectorAll('article[data-album-post]');
+                    const cardCount = cards.length;
                     const target = $scrollTargetCount;
 
                     if (el && hasText && target <= 0) {
@@ -86,12 +89,15 @@ abstract class Picazor : KeiSource() {
                         return JSON.stringify({ ready: true, count: cardCount, html: document.documentElement.outerHTML });
                     }
 
+                    if (cards.length > 0) {
+                        cards[cards.length - 1].scrollIntoView({ behavior: 'instant', block: 'end' });
+                    }
                     window.scrollTo(0, document.body.scrollHeight);
                     return JSON.stringify({ ready: false, count: cardCount, html: null });
                 })()
             """.trimIndent()
 
-            poll(interval = 600.milliseconds) {
+            poll(interval = 350.milliseconds) {
                 ticks++
                 evaluateJs(checkAndScrollJs) { rawJson ->
                     val decoded = decodeJsonString(rawJson)
@@ -103,16 +109,16 @@ abstract class Picazor : KeiSource() {
                     if (count > lastCardCount) {
                         lastCardCount = count
                         stagnantTicks = 0
-                    } else if (scrollTargetCount > 0) {
+                    } else if (scrollTargetCount > 0 && count > 0) {
                         stagnantTicks++
                     }
 
-                    val reachedEnd = scrollTargetCount > 0 && count > 0 && stagnantTicks >= 12
-                    val timedOutByTicks = ticks >= 65
+                    val reachedEnd = scrollTargetCount > 0 && count > 0 && stagnantTicks >= 4
+                    val maxTicksReached = ticks >= 30
 
                     if (isReady && readyHtml.isNotBlank()) {
                         resolve(readyHtml)
-                    } else if (reachedEnd || timedOutByTicks) {
+                    } else if (reachedEnd || maxTicksReached || (scrollTargetCount <= 0 && ticks >= 12)) {
                         evaluateJs("document.documentElement.outerHTML") { fallbackJson ->
                             resolve(decodeJsonString(fallbackJson).orEmpty())
                         }
@@ -134,7 +140,8 @@ abstract class Picazor : KeiSource() {
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val targetCards = page * pageSize
-        val doc = fetchDocument(url = "$baseUrl/hot", scrollTargetCount = targetCards)
+        val timeout = if (page <= 1) 12.seconds else 20.seconds
+        val doc = fetchDocument(url = "$baseUrl/hot", scrollTargetCount = targetCards, timeout = timeout)
         return parseCreators(doc, page)
     }
 
@@ -142,7 +149,8 @@ abstract class Picazor : KeiSource() {
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         val targetCards = page * pageSize
-        val doc = fetchDocument(url = baseUrl, scrollTargetCount = targetCards)
+        val timeout = if (page <= 1) 12.seconds else 20.seconds
+        val doc = fetchDocument(url = baseUrl, scrollTargetCount = targetCards, timeout = timeout)
         return parseCreators(doc, page)
     }
 
@@ -151,7 +159,8 @@ abstract class Picazor : KeiSource() {
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val encodedQuery = query.trim().replace(" ", "%20")
         val targetCards = page * pageSize
-        val doc = fetchDocument(url = "$baseUrl/search/$encodedQuery", scrollTargetCount = targetCards)
+        val timeout = if (page <= 1) 12.seconds else 20.seconds
+        val doc = fetchDocument(url = "$baseUrl/search/$encodedQuery", scrollTargetCount = targetCards, timeout = timeout)
         return parseCreators(doc, page)
     }
 
@@ -263,7 +272,7 @@ abstract class Picazor : KeiSource() {
     ): SMangaUpdate = coroutineScope {
         val detailsDeferred = async {
             if (fetchDetails) {
-                val doc = fetchDocument(siteRoot + manga.url, "h1, #main-content")
+                val doc = fetchDocument(siteRoot + manga.url, "h1, #main-content", timeout = 12.seconds)
                 parseMangaDetails(doc, manga)
             } else {
                 manga
@@ -315,7 +324,7 @@ abstract class Picazor : KeiSource() {
         var pages = 0
 
         while (nextUrl != null && pages++ < 100) {
-            val doc = fetchDocument(nextUrl, "a[href*=\"/albums/\"], #main-content")
+            val doc = fetchDocument(nextUrl, "a[href*=\"/albums/\"], #main-content", timeout = 12.seconds)
             result += parseChapters(doc, manga)
 
             nextUrl = doc.selectFirst("a[rel=next]")?.absHref()
@@ -357,10 +366,11 @@ abstract class Picazor : KeiSource() {
     // ------------------------------------------------------------------- Páginas
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val albumUrl = siteRoot + chapter.url
+        val pageUrl = siteRoot + chapter.url
         val doc = fetchDocument(
-            albumUrl,
-            "[data-file-viewer=\"true\"], [data-file-player=\"true\"], video source[src], video[src], a[href], img, #main-content",
+            url = pageUrl,
+            readySelector = "[data-file-player=\"true\"] source[src], [data-file-player=\"true\"] video[src], [data-file-viewer=\"true\"], a[href], img, #main-content",
+            timeout = 15.seconds,
         )
         val photos = photoAnchors(doc)
 
@@ -387,8 +397,8 @@ abstract class Picazor : KeiSource() {
         val allVideos = (derivedVideos + extractDirectVideos(doc)).distinct().reversed()
         if (allVideos.isNotEmpty()) {
             throw Exception(
-                "Este capítulo contiene video (${allVideos.size}) y el lector solo muestra imágenes.\n" +
-                    "Abre en navegador/WebView o copia el enlace:\n${allVideos.first()}",
+                "Este capítulo es de video (${allVideos.size}) y el visor de imágenes no lo reproduce.\n" +
+                    "Ábrelo en navegador/WebView o copia el enlace:\n${allVideos.first()}",
             )
         }
 
