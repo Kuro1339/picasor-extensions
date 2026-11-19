@@ -57,26 +57,21 @@ class Picazor : HttpSource() {
 
     // ------------------------------------------------------------------ Popular
 
-    override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/es/creators/top/$page", headers)
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/es/creators/top/$page", headers)
 
-    override fun popularMangaParse(response: Response): MangasPage =
-        parseCreators(response.asJsoup(), response.request.url.toString())
+    override fun popularMangaParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
 
     // ------------------------------------------------------------------- Latest
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$localePrefix/page/$page", headers)
 
-    override fun latestUpdatesParse(response: Response): MangasPage =
-        parseCreators(response.asJsoup(), response.request.url.toString())
+    override fun latestUpdatesParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
 
     // ------------------------------------------------------------------- Search
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
-        GET("$localePrefix/search/${query.trim()}", headers)
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = GET("$localePrefix/search/${query.trim()}", headers)
 
-    override fun searchMangaParse(response: Response): MangasPage =
-        parseCreators(response.asJsoup(), response.request.url.toString())
+    override fun searchMangaParse(response: Response): MangasPage = parseCreators(response.asJsoup(), response.request.url.toString())
 
     private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
         val isFirstPage = !pageUrl.contains(Regex("""/(page|top)/\d+$"""))
@@ -145,8 +140,7 @@ class Picazor : HttpSource() {
 
     // ----------------------------------------------------------------- Capítulos
 
-    override fun chapterListRequest(manga: SManga): Request =
-        GET(baseUrl + manga.url + "/albums", headers)
+    override fun chapterListRequest(manga: SManga): Request = GET(baseUrl + manga.url + "/albums", headers)
 
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.defer {
         val chapters = mutableListOf<SChapter>()
@@ -168,8 +162,7 @@ class Picazor : HttpSource() {
         Observable.just(chapters.distinctBy { it.url })
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> =
-        parseChapters(response.asJsoup(), null)
+    override fun chapterListParse(response: Response): List<SChapter> = parseChapters(response.asJsoup(), null)
 
     private fun parseChapters(doc: Document, manga: SManga?): List<SChapter> {
         val scope = doc.selectFirst("#main-content") ?: return emptyList()
