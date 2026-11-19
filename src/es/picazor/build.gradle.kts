@@ -1,12 +1,19 @@
+import io.github.keiyoushi.gradle.api.ContentWarning
+
 plugins {
-    id("com.android.application")
     alias(kei.plugins.extension)
 }
 
-ext {
-    set("extName", "Picazor")
-    set("extClass", ".Picazor")
-    set("extVersionCode", 1)
+keiyoushi {
+    name = "Picazor"
+    versionCode = 1
+    contentWarning = ContentWarning.NSFW
+    libVersion = "1.6"
+
+    source {
+        lang = "es"
+        baseUrl = "https://picazor.com"
+    }
 }
 
 dependencies {
