@@ -27,7 +27,6 @@ abstract class Picazor : KeiSource() {
     override val supportsLatest = true
 
     private val siteRoot = "https://picazor.com"
-    private val creatorUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+$""")
     private val photoUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+/\d+$""")
     private val sizePrefixRegex = Regex("""/\d+px_""")
     private val contentUrlRegex = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
@@ -76,32 +75,31 @@ abstract class Picazor : KeiSource() {
         val container = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
 
         val entries = container.select("a[href]")
-            .filter { it.closest(".breadcrumbs") == null }
             .mapNotNull { anchor ->
-                val raw = anchor.absHref().substringBefore('#').substringBefore('?')
-                val creatorUrl = raw.replace(albumIdRegex, "")
-                if (!creatorUrlRegex.matches(creatorUrl)) return@mapNotNull null
-                if (creatorUrl.substringAfterLast('/') in reservedSegments) return@mapNotNull null
+                val href = anchor.absHref().substringBefore('#').substringBefore('?')
+                if (!href.startsWith("https://picazor.com/es/")) return@mapNotNull null
+                val cleanUrl = href.replace(albumIdRegex, "")
+                val slug = cleanUrl.removePrefix("https://picazor.com/es/").trim('/')
+                if (slug.isBlank() || '/' in slug || slug in reservedSegments) return@mapNotNull null
 
                 val card = anchor.closest("[class*=group/post]")
                     ?: anchor.closest("article")
                     ?: anchor.parent()
 
-                val nameSpan = anchor.selectFirst("[data-album-post-name]")?.text()?.trim()
-                val imgAlt = anchor.selectFirst("img")?.attr("alt")?.substringBefore(" - ")?.trim()
-                val title = nameSpan
+                val title = anchor.selectFirst("[data-album-post-name]")?.text()?.trim()
                     ?.takeIf { it.isNotBlank() }
-                    ?: imgAlt?.takeIf { it.isNotBlank() }
+                    ?: anchor.selectFirst("img")?.attr("alt")?.substringBefore(" - ")?.trim()
+                        ?.takeIf { it.isNotBlank() }
                     ?: anchor.text().trim()
-
-                if (title.isBlank()) return@mapNotNull null
+                        .takeIf { it.isNotBlank() }
+                    ?: slug
 
                 val thumb = card?.selectFirst("a[href*=/albums/] img")?.absSrc()?.takeIf { it.isNotBlank() }
                     ?: card?.selectFirst("img")?.absSrc()?.takeIf { it.isNotBlank() }
                     ?: anchor.selectFirst("img")?.absSrc()
 
                 SManga.create().apply {
-                    setUrlWithoutDomain(creatorUrl.substringAfter(siteRoot))
+                    setUrlWithoutDomain(cleanUrl.substringAfter(siteRoot))
                     this.title = title
                     thumbnail_url = thumb
                 }
