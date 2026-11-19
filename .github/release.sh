@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+[ -x "$SDKM" ] || SDKM="$(command -v sdkmanager)"
+yes | "$SDKM" "build-tools;35.0.0" > /dev/null || true
+
 VER="${VERSION#v}"
 CODE="${GITHUB_RUN_NUMBER}"
 
@@ -8,12 +13,11 @@ F=src/es/picazor/build.gradle.kts
 sed -i -E "s/versionCode = [0-9]+/versionCode = $CODE/" "$F"
 sed -i -E "s/versionName = \"[^\"]+\"/versionName = \"$VER\"/" "$F"
 
-sdkmanager "build-tools;35.0.0" > /dev/null
 chmod +x gradlew
 ./gradlew :src:es:picazor:assembleRelease -x lint -x ktlintCheck
 
 echo "$KEYSTORE_BASE64" | base64 -d > /tmp/ks.jks
-APK=$(ls src/es/picazor/build/outputs/apk/release/*.apk | head -n1)
+APK=$(find src/es/picazor/build/outputs/apk/release -name '*.apk' | head -n1)
 BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
 "$BT/zipalign" -f 4 "$APK" /tmp/a.apk
 "$BT/apksigner" sign --ks /tmp/ks.jks --ks-pass "pass:$KEYSTORE_PASSWORD" \
