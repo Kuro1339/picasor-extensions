@@ -23,10 +23,10 @@ import java.util.Locale
 abstract class Picazor : KeiSource() {
 
     override val name = "Picazor"
-    override val baseUrl = "https://picazor.com"
+    override val baseUrl = "https://picazor.com/es"
     override val supportsLatest = true
 
-    private val localePrefix = "$baseUrl/es"
+    private val siteRoot = "https://picazor.com"
     private val creatorUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+$""")
     private val photoUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+/\d+$""")
     private val sizePrefixRegex = Regex("""/\d+px_""")
@@ -43,21 +43,22 @@ abstract class Picazor : KeiSource() {
         "terms-of-service", "privacy-policy", "2257",
     )
 
-    override fun getMangaUrl(manga: SManga): String = baseUrl + manga.url
+    override fun getMangaUrl(manga: SManga): String = siteRoot + manga.url
 
-    override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
+    override fun getChapterUrl(chapter: SChapter): String = siteRoot + chapter.url
 
     // ------------------------------------------------------------------ Popular
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val doc = client.get("$baseUrl/es/creators/top/$page", Fetch.DOCUMENT).asJsoup()
-        return parseCreators(doc, "$baseUrl/es/creators/top/$page")
+        val url = if (page <= 1) "$baseUrl/hot" else "$baseUrl/hot/page/$page"
+        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        return parseCreators(doc, url)
     }
 
     // ------------------------------------------------------------------- Latest
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val url = "$localePrefix/page/$page"
+        val url = if (page <= 1) baseUrl else "$baseUrl/page/$page"
         val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
         return parseCreators(doc, url)
     }
@@ -65,13 +66,13 @@ abstract class Picazor : KeiSource() {
     // ------------------------------------------------------------------- Search
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        val url = "$localePrefix/search/${query.trim()}"
+        val url = "$baseUrl/search/${query.trim()}"
         val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
         return parseCreators(doc, url)
     }
 
     private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
-        val isFirstPage = !pageUrl.contains(Regex("""/(page|top)/\d+$"""))
+        val isFirstPage = !pageUrl.contains(Regex("""/page/\d+$"""))
 
         val entries = doc.select("#main-content a[href]")
             .filter { it.closest(".breadcrumbs") == null }
@@ -88,7 +89,7 @@ abstract class Picazor : KeiSource() {
                 if (title.isBlank()) return@mapNotNull null
 
                 SManga.create().apply {
-                    setUrlWithoutDomain(creatorUrl.substringAfter(baseUrl))
+                    setUrlWithoutDomain(creatorUrl.substringAfter(siteRoot))
                     this.title = title
                     thumbnail_url = img.absSrc()
                 }
@@ -99,7 +100,7 @@ abstract class Picazor : KeiSource() {
             false
         } else {
             isFirstPage || doc.selectFirst("#main-content a[rel=next]") != null ||
-                doc.select("#main-content a[href]").any { it.absHref().contains(Regex("""/(page|top)/\d+$""")) }
+                doc.select("#main-content a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
         }
 
         return MangasPage(entries, hasNext)
@@ -115,7 +116,7 @@ abstract class Picazor : KeiSource() {
     ): SMangaUpdate = coroutineScope {
         val detailsDeferred = async {
             if (fetchDetails) {
-                val doc = client.get(baseUrl + manga.url, Fetch.DOCUMENT).asJsoup()
+                val doc = client.get(siteRoot + manga.url, Fetch.DOCUMENT).asJsoup()
                 parseMangaDetails(doc, manga)
             } else {
                 manga
@@ -162,7 +163,7 @@ abstract class Picazor : KeiSource() {
 
     private suspend fun fetchAllChapters(manga: SManga): List<SChapter> {
         val result = mutableListOf<SChapter>()
-        var nextUrl: String? = baseUrl + manga.url + "/albums"
+        var nextUrl: String? = siteRoot + manga.url + "/albums"
         var pages = 0
 
         while (nextUrl != null && pages++ < 100) {
@@ -189,7 +190,7 @@ abstract class Picazor : KeiSource() {
                 val albumId = albumIdRegex.find(url)?.groupValues?.get(1) ?: return@mapNotNull null
 
                 SChapter.create().apply {
-                    setUrlWithoutDomain(url.substringAfter(baseUrl))
+                    setUrlWithoutDomain(url.substringAfter(siteRoot))
                     name = "Álbum #$albumId"
                     chapter_number = albumId.toFloatOrNull() ?: -1f
                     date_upload = parseSpanishDate(scope.text())
@@ -208,7 +209,7 @@ abstract class Picazor : KeiSource() {
     // ------------------------------------------------------------------- Páginas
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val albumUrl = baseUrl + chapter.url
+        val albumUrl = siteRoot + chapter.url
         val doc = client.get(albumUrl, Fetch.DOCUMENT).asJsoup()
         val photos = photoAnchors(doc)
 
@@ -245,7 +246,7 @@ abstract class Picazor : KeiSource() {
         value.isBlank() -> ""
         value.startsWith("http") -> value
         value.startsWith("//") -> "https:$value"
-        value.startsWith("/") -> baseUrl + value
-        else -> "$baseUrl/$value"
+        value.startsWith("/") -> siteRoot + value
+        else -> "$siteRoot/$value"
     }
 }
