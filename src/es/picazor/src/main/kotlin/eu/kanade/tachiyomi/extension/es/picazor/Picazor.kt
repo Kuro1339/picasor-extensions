@@ -10,14 +10,17 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.asJsoup
+import keiyoushi.utils.runWebView
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import org.json.JSONTokener
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Picazor : KeiSource() {
@@ -46,11 +49,54 @@ abstract class Picazor : KeiSource() {
 
     override fun getChapterUrl(chapter: SChapter): String = siteRoot + chapter.url
 
+    private suspend fun fetchDocument(
+        url: String,
+        readySelector: String = "article[data-album-post], [data-home-feed=\"true\"] a[href*=\"/albums/\"], #main-content a[href]",
+    ): Document {
+        val html = runWebView<String>(timeout = 25.seconds) {
+            blockImages = true
+            loadUrl(url)
+
+            var ticks = 0
+            val checkJs = """
+                (() => {
+                    const selector = ${org.json.JSONObject.quote(readySelector)};
+                    const el = document.querySelector(selector);
+                    const hasText = document.body && document.body.innerText && document.body.innerText.trim().length > 80;
+                    if (el && hasText) return document.documentElement.outerHTML;
+                    return null;
+                })()
+            """.trimIndent()
+
+            poll(interval = 400.milliseconds) {
+                ticks++
+                evaluateJs(checkJs) { rawJson ->
+                    val decoded = decodeJsonString(rawJson)
+                    if (!decoded.isNullOrBlank()) {
+                        resolve(decoded)
+                    } else if (ticks >= 45) {
+                        evaluateJs("document.documentElement.outerHTML") { fallbackJson ->
+                            resolve(decodeJsonString(fallbackJson).orEmpty())
+                        }
+                    }
+                }
+            }
+        }
+        return Jsoup.parse(html, url)
+    }
+
+    private fun decodeJsonString(raw: String?): String? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return runCatching {
+            JSONTokener(raw).nextValue() as? String
+        }.getOrNull()
+    }
+
     // ------------------------------------------------------------------ Popular
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val url = if (page <= 1) "$baseUrl/hot" else "$baseUrl/hot/page/$page"
-        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        val doc = fetchDocument(url)
         return parseCreators(doc, url)
     }
 
@@ -58,46 +104,56 @@ abstract class Picazor : KeiSource() {
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         val url = if (page <= 1) baseUrl else "$baseUrl/page/$page"
-        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        val doc = fetchDocument(url)
         return parseCreators(doc, url)
     }
 
     // ------------------------------------------------------------------- Search
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        val url = "$baseUrl/search/${query.trim()}"
-        val doc = client.get(url, Fetch.DOCUMENT).asJsoup()
+        val encodedQuery = query.trim().replace(" ", "%20")
+        val url = if (page <= 1) "$baseUrl/search/$encodedQuery" else "$baseUrl/search/$encodedQuery/page/$page"
+        val doc = fetchDocument(url)
         return parseCreators(doc, url)
     }
 
     private fun parseCreators(doc: Document, pageUrl: String): MangasPage {
         val isFirstPage = !pageUrl.contains(Regex("""/page/\d+$"""))
-        val container = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
+        val container = doc.selectFirst("[data-home-feed=\"true\"]")
+            ?: doc.selectFirst("#main-content")
+            ?: doc.selectFirst("main")
+            ?: doc
 
-        val rawEntries = container.select("a[href]")
-            .mapNotNull { anchor ->
-                val rawHref = anchor.attr("href").trim()
-                val href = absolutize(rawHref).substringBefore('#').substringBefore('?')
-                if (!href.startsWith("https://picazor.com/es/")) return@mapNotNull null
-                val cleanUrl = href.replace(albumIdRegex, "")
-                val slug = cleanUrl.removePrefix("https://picazor.com/es/").trim('/')
-                if (slug.isBlank() || '/' in slug || slug in reservedSegments) return@mapNotNull null
+        val cards = container.select("article[data-album-post]")
 
-                val card = anchor.closest("[class*=group/post]")
-                    ?: anchor.closest("article")
-                    ?: anchor.parent()
+        val rawEntries = if (cards.isNotEmpty()) {
+            cards.mapNotNull { card ->
+                val creatorAnchor = card.selectFirst("a[data-card-name=\"true\"][href]")
+                    ?: card.selectFirst("a[href^=\"/es/\"]:not([href*=\"/albums/\"])")
+                    ?: return@mapNotNull null
 
-                val title = anchor.selectFirst("[data-album-post-name]")?.text()?.trim()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: anchor.selectFirst("img")?.attr("alt")?.substringBefore(" - ")?.trim()
+                val cleanUrl = absolutize(creatorAnchor.attr("href"))
+                    .substringBefore('#')
+                    .substringBefore('?')
+                    .replace(albumIdRegex, "")
+
+                val slug = extractCreatorSlug(cleanUrl) ?: return@mapNotNull null
+
+                val previewImg = card.selectFirst("[data-home-preview=\"true\"] a[href*=\"/albums/\"] img")
+                    ?: card.selectFirst("img")
+
+                val title = creatorAnchor.attr("aria-label")
+                    .substringBefore(",")
+                    .trim()
+                    .takeIf { it.isNotBlank() }
+                    ?: previewImg?.attr("alt")
+                        ?.substringBefore(" - ")
+                        ?.trim()
                         ?.takeIf { it.isNotBlank() }
-                    ?: anchor.text().trim()
-                        .takeIf { it.isNotBlank() }
+                    ?: creatorAnchor.text().trim().takeIf { it.isNotBlank() }
                     ?: slug
 
-                val thumb = card?.selectFirst("a[href*=/albums/] img")?.absSrc()?.takeIf { it.isNotBlank() }
-                    ?: card?.selectFirst("img")?.absSrc()?.takeIf { it.isNotBlank() }
-                    ?: anchor.selectFirst("img")?.absSrc()
+                val thumb = previewImg?.absSrc()?.takeIf { it.isNotBlank() }
 
                 SManga.create().apply {
                     setUrlWithoutDomain(cleanUrl.substringAfter(siteRoot))
@@ -105,7 +161,32 @@ abstract class Picazor : KeiSource() {
                     thumbnail_url = thumb
                 }
             }
-            .distinctBy { it.url }
+        } else {
+            container.select("a[href]").mapNotNull { anchor ->
+                val href = absolutize(anchor.attr("href")).substringBefore('#').substringBefore('?')
+                if (!href.startsWith("$siteRoot/es/")) return@mapNotNull null
+                val cleanUrl = href.replace(albumIdRegex, "")
+                val slug = extractCreatorSlug(cleanUrl) ?: return@mapNotNull null
+
+                val card = anchor.closest("article[data-album-post]")
+                    ?: anchor.closest("article")
+                    ?: anchor.parent()
+
+                val title = anchor.selectFirst("img")?.attr("alt")?.substringBefore(" - ")?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: anchor.text().trim().takeIf { it.isNotBlank() }
+                    ?: slug
+
+                val thumb = card?.selectFirst("a[href*=\"/albums/\"] img")?.absSrc()?.takeIf { it.isNotBlank() }
+                    ?: card?.selectFirst("img")?.absSrc()
+
+                SManga.create().apply {
+                    setUrlWithoutDomain(cleanUrl.substringAfter(siteRoot))
+                    this.title = title
+                    thumbnail_url = thumb
+                }
+            }
+        }.distinctBy { it.url }
 
         if (rawEntries.isEmpty()) {
             val sampleHref = container.select("a[href]").firstOrNull()?.attr("href")?.take(40).orEmpty()
@@ -122,6 +203,14 @@ abstract class Picazor : KeiSource() {
         return MangasPage(rawEntries, hasNext)
     }
 
+    private fun extractCreatorSlug(cleanUrl: String): String? {
+        val prefix = "$siteRoot/es/"
+        if (!cleanUrl.startsWith(prefix)) return null
+        val slug = cleanUrl.removePrefix(prefix).trim('/')
+        if (slug.isBlank() || '/' in slug || slug in reservedSegments) return null
+        return slug
+    }
+
     // --------------------------------------------------------- Detalles y Capítulos
 
     override suspend fun fetchMangaUpdate(
@@ -132,7 +221,7 @@ abstract class Picazor : KeiSource() {
     ): SMangaUpdate = coroutineScope {
         val detailsDeferred = async {
             if (fetchDetails) {
-                val doc = client.get(siteRoot + manga.url, Fetch.DOCUMENT).asJsoup()
+                val doc = fetchDocument(siteRoot + manga.url, "h1, #main-content")
                 parseMangaDetails(doc, manga)
             } else {
                 manga
@@ -152,16 +241,17 @@ abstract class Picazor : KeiSource() {
         val scope = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
 
         val title = scope.selectFirst("h1")?.text()?.trim()
-            ?: throw Exception("Creador no encontrado")
+            ?.takeIf { it.isNotBlank() }
+            ?: manga.title
         val handle = scope.selectFirst("[data-file-auxnames] bdi")?.text()?.trim()
-        val onlyfans = scope.selectFirst("a[href^=https://onlyfans.com]")?.absHref()
+        val onlyfans = scope.selectFirst("a[href^=\"https://onlyfans.com\"]")?.absHref()
 
         return SManga.create().apply {
             url = manga.url
             this.title = title
             author = handle
             artist = handle
-            thumbnail_url = scope.selectFirst("img[src*=\"/images/profiles/\"]")?.absSrc()
+            thumbnail_url = scope.selectFirst("img[src*=\"/images/profiles/\"]")?.absSrc() ?: manga.thumbnail_url
             genre = scope.select("a[href*=\"/tags/\"]")
                 .map { it.text().trim() }
                 .filter { it.isNotEmpty() }
@@ -183,13 +273,13 @@ abstract class Picazor : KeiSource() {
         var pages = 0
 
         while (nextUrl != null && pages++ < 100) {
-            val doc = client.get(nextUrl, Fetch.DOCUMENT).asJsoup()
+            val doc = fetchDocument(nextUrl, "a[href*=\"/albums/\"], #main-content")
             result += parseChapters(doc, manga)
 
             nextUrl = doc.selectFirst("a[rel=next]")?.absHref()
                 ?: doc.select("a[href]")
                     .firstOrNull {
-                        it.text().trim().startsWith("Sig") && it.absHref().contains("/albums")
+                        it.text().trim().startsWith("Sig", ignoreCase = true) && it.absHref().contains("/albums")
                     }
                     ?.absHref()
         }
@@ -219,18 +309,18 @@ abstract class Picazor : KeiSource() {
     private fun parseSpanishDate(text: String): Long {
         val match = spanishDateRegex.find(text) ?: return 0L
         val (day, month, year) = match.destructured
-        return runCatching { dateFormat.parse("$day de $month de $year")?.time ?: 0L }.getOrDefault(0L)
+        return runCatching { dateFormat.parse("$day de $month de$year")?.time ?: 0L }.getOrDefault(0L)
     }
 
     // ------------------------------------------------------------------- Páginas
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val albumUrl = siteRoot + chapter.url
-        val doc = client.get(albumUrl, Fetch.DOCUMENT).asJsoup()
+        val doc = fetchDocument(albumUrl, "a[href], img, #main-content")
         val photos = photoAnchors(doc)
 
         val derived = photos.mapNotNull { anchor ->
-            anchor.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "")
+            anchor.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "/")
         }.filter { it.isNotBlank() }.distinct().reversed()
 
         val urls = if (derived.isNotEmpty()) {
@@ -239,7 +329,7 @@ abstract class Picazor : KeiSource() {
             photos.mapNotNull { anchor ->
                 runCatching {
                     val body = client.get(anchor.absHref(), Fetch.DOCUMENT).body.string()
-                    contentUrlRegex.find(body)?.groupValues?.get(1) ?: Jsoup.parse(body).baseUri().takeIf { false }
+                    contentUrlRegex.find(body)?.groupValues?.get(1)
                 }.getOrNull()
             }.distinct().reversed()
         }
@@ -260,9 +350,3 @@ abstract class Picazor : KeiSource() {
 
     private fun absolutize(value: String): String = when {
         value.isBlank() -> ""
-        value.startsWith("http") -> value
-        value.startsWith("//") -> "https:$value"
-        value.startsWith("/") -> siteRoot + value
-        else -> "$siteRoot/$value"
-    }
-}
