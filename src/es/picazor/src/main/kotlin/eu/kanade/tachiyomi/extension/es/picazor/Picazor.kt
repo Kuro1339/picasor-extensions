@@ -74,9 +74,10 @@ abstract class Picazor : KeiSource() {
         val isFirstPage = !pageUrl.contains(Regex("""/page/\d+$"""))
         val container = doc.selectFirst("#main-content") ?: doc.selectFirst("main") ?: doc
 
-        val entries = container.select("a[href]")
+        val rawEntries = container.select("a[href]")
             .mapNotNull { anchor ->
-                val href = anchor.absHref().substringBefore('#').substringBefore('?')
+                val rawHref = anchor.attr("href").trim()
+                val href = absolutize(rawHref).substringBefore('#').substringBefore('?')
                 if (!href.startsWith("https://picazor.com/es/")) return@mapNotNull null
                 val cleanUrl = href.replace(albumIdRegex, "")
                 val slug = cleanUrl.removePrefix("https://picazor.com/es/").trim('/')
@@ -106,14 +107,19 @@ abstract class Picazor : KeiSource() {
             }
             .distinctBy { it.url }
 
-        val hasNext = if (entries.isEmpty()) {
-            false
-        } else {
-            isFirstPage || container.selectFirst("a[rel=next]") != null ||
-                container.select("a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
+        if (rawEntries.isEmpty()) {
+            val sampleHref = container.select("a[href]").firstOrNull()?.attr("href")?.take(40).orEmpty()
+            val debugItem = SManga.create().apply {
+                url = "/es/marley-brinx"
+                title = "L:${container.select("a[href]").size} I:${container.select("img").size} T:${doc.title().take(25)} H:$sampleHref"
+            }
+            return MangasPage(listOf(debugItem), false)
         }
 
-        return MangasPage(entries, hasNext)
+        val hasNext = isFirstPage || container.selectFirst("a[rel=next]") != null ||
+            container.select("a[href]").any { it.absHref().contains(Regex("""/page/\d+$""")) }
+
+        return MangasPage(rawEntries, hasNext)
     }
 
     // --------------------------------------------------------- Detalles y Capítulos
