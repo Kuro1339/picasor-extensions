@@ -18,13 +18,14 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-class Picazor : KeiSource() {
+class Picazor(
+    override val lang: String,
+    override val id: Long,
+) : KeiSource() {
 
     override val name = "Picazor"
     override val baseUrl = "https://picazor.com"
-    override val lang = "es"
     override val supportsLatest = true
-    override val versionId = 1
 
     override val isNsfw = true
 
