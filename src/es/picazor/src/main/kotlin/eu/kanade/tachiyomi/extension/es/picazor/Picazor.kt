@@ -31,12 +31,12 @@ abstract class Picazor : KeiSource() {
     override val supportsLatest = true
 
     private val siteRoot = "https://picazor.com"
+    private val pageSize = 20
     private val photoUrlRegex = Regex("""^https://picazor\.com/es/[^/#]+/\d+$""")
     private val sizePrefixRegex = Regex("""/\d+px_""")
     private val videoThumbSuffixRegex = Regex("""\.(mp4|webm|m3u8)\.(jpe?g|png|webp)$""", RegexOption.IGNORE_CASE)
     private val contentUrlRegex = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
     private val albumIdRegex = Regex("""/albums/(\d+)$""")
-    private val pageParamRegex = Regex("""(?:/page/|[?&]page=)(\d+)""")
     private val spanishDateRegex = Regex("""(\d{1,2}) de (\w+) de (\d{4})""")
     private val mediaUrlRegex = Regex(
         """https?://[^\s"'<>\\]+\.(?:mp4|m3u8|webm|mpd)(?:\?[^\s"'<>\\]*)?""",
@@ -59,29 +59,60 @@ abstract class Picazor : KeiSource() {
     private suspend fun fetchDocument(
         url: String,
         readySelector: String = "article[data-album-post], [data-home-feed=\"true\"] a[href*=\"/albums/\"], #main-content a[href]",
+        scrollTargetCount: Int = 0,
     ): Document {
-        val html = runWebView<String>(timeout = 25.seconds) {
+        val html = runWebView<String>(timeout = 45.seconds) {
             blockImages = true
             loadUrl(url)
 
             var ticks = 0
+            var lastCardCount = 0
+            var stagnantTicks = 0
             val quotedSelector = JSONObject.quote(readySelector)
-            val checkJs = """
+
+            val checkAndScrollJs = """
                 (() => {
-                    const el = document.querySelector($quotedSelector);
+                    const selector = $quotedSelector;
+                    const el = document.querySelector(selector);
                     const hasText = document.body && document.body.innerText && document.body.innerText.trim().length > 80;
-                    if (el && hasText) return document.documentElement.outerHTML;
-                    return null;
+                    const cardCount = document.querySelectorAll('article[data-album-post]').length;
+                    const target = $scrollTargetCount;
+
+                    if (el && hasText && target <= 0) {
+                        return JSON.stringify({ ready: true, count: cardCount, html: document.documentElement.outerHTML });
+                    }
+
+                    if (el && hasText && target > 0 && cardCount >= target) {
+                        return JSON.stringify({ ready: true, count: cardCount, html: document.documentElement.outerHTML });
+                    }
+
+                    window.scrollTo(0, document.body.scrollHeight);
+                    return JSON.stringify({ ready: false, count: cardCount, html: null });
                 })()
             """.trimIndent()
 
-            poll(interval = 400.milliseconds) {
+            poll(interval = 600.milliseconds) {
                 ticks++
-                evaluateJs(checkJs) { rawJson ->
+                evaluateJs(checkAndScrollJs) { rawJson ->
                     val decoded = decodeJsonString(rawJson)
-                    if (!decoded.isNullOrBlank()) {
-                        resolve(decoded)
-                    } else if (ticks >= 45) {
+                    val obj = decoded?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    val isReady = obj?.optBoolean("ready", false) == true
+                    val count = obj?.optInt("count", 0) ?: 0
+                    val readyHtml = obj?.optString("html").orEmpty()
+
+                    if (count > lastCardCount) {
+                        lastCardCount = count
+                        stagnantTicks = 0
+                    } else if (scrollTargetCount > 0) {
+                        stagnantTicks++
+                    }
+
+                    val reachedEnd = scrollTargetCount > 0 && count > 0 && stagnantTicks >= 12
+                    val timedOutByTicks = ticks >= 65
+
+                    if (isReady && readyHtml.isNotBlank()) {
+                        resolve(readyHtml)
+                    } else if (reachedEnd || timedOutByTicks) {
                         evaluateJs("document.documentElement.outerHTML") { fallbackJson ->
                             resolve(decodeJsonString(fallbackJson).orEmpty())
                         }
@@ -102,16 +133,16 @@ abstract class Picazor : KeiSource() {
     // ------------------------------------------------------------------ Popular
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val url = if (page <= 1) "$baseUrl/hot" else "$baseUrl/hot/page/$page"
-        val doc = fetchDocument(url)
+        val targetCards = page * pageSize
+        val doc = fetchDocument(url = "$baseUrl/hot", scrollTargetCount = targetCards)
         return parseCreators(doc, page)
     }
 
     // ------------------------------------------------------------------- Latest
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val url = if (page <= 1) baseUrl else "$baseUrl/page/$page"
-        val doc = fetchDocument(url)
+        val targetCards = page * pageSize
+        val doc = fetchDocument(url = baseUrl, scrollTargetCount = targetCards)
         return parseCreators(doc, page)
     }
 
@@ -119,12 +150,12 @@ abstract class Picazor : KeiSource() {
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val encodedQuery = query.trim().replace(" ", "%20")
-        val url = if (page <= 1) "$baseUrl/search/$encodedQuery" else "$baseUrl/search/$encodedQuery/page/$page"
-        val doc = fetchDocument(url)
+        val targetCards = page * pageSize
+        val doc = fetchDocument(url = "$baseUrl/search/$encodedQuery", scrollTargetCount = targetCards)
         return parseCreators(doc, page)
     }
 
-    private fun parseCreators(doc: Document, currentPage: Int): MangasPage {
+    private fun parseCreators(doc: Document, page: Int): MangasPage {
         val container = doc.selectFirst("[data-home-feed=\"true\"]")
             ?: doc.selectFirst("#main-content")
             ?: doc.selectFirst("main")
@@ -203,18 +234,15 @@ abstract class Picazor : KeiSource() {
             return MangasPage(listOf(debugItem), false)
         }
 
-        val nextPage = currentPage + 1
-        val allLinks = doc.select("a[href]")
-        val hasNext = doc.selectFirst("a[rel=next]") != null ||
-            allLinks.any { anchor ->
-                val href = anchor.absHref()
-                val pageNum = pageParamRegex.find(href)?.groupValues?.get(1)?.toIntOrNull()
-                (pageNum != null && pageNum >= nextPage) ||
-                    anchor.text().trim().startsWith("Sig", ignoreCase = true)
-            } ||
-            (currentPage == 1 && rawEntries.size >= 10)
+        val startIndex = ((page - 1) * pageSize).coerceAtLeast(0)
+        if (startIndex >= rawEntries.size) {
+            return MangasPage(emptyList(), false)
+        }
 
-        return MangasPage(rawEntries, hasNext)
+        val pageItems = rawEntries.drop(startIndex).take(pageSize)
+        val hasNext = rawEntries.size > startIndex + pageItems.size || cards.size >= page * pageSize
+
+        return MangasPage(pageItems, hasNext)
     }
 
     private fun extractCreatorSlug(cleanUrl: String): String? {
