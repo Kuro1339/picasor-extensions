@@ -36,6 +36,10 @@ abstract class Picazor : KeiSource() {
     private val contentUrlRegex = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
     private val albumIdRegex = Regex("""/albums/(\d+)$""")
     private val spanishDateRegex = Regex("""(\d{1,2}) de (\w+) de (\d{4})""")
+    private val mediaUrlRegex = Regex(
+        """https?://[^\s"'<>\\]+\.(?:mp4|m3u8|webm|mpd)(?:\?[^\s"'<>\\]*)?""",
+        RegexOption.IGNORE_CASE,
+    )
     private val dateFormat = SimpleDateFormat("d 'de' MMMM 'de' yyyy", Locale("es", "ES"))
 
     private val reservedSegments = setOf(
@@ -317,25 +321,68 @@ abstract class Picazor : KeiSource() {
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val albumUrl = siteRoot + chapter.url
-        val doc = fetchDocument(albumUrl, "a[href], img, #main-content")
+        val doc = fetchDocument(
+            albumUrl,
+            "[data-file-viewer=\"true\"], [data-file-player=\"true\"], video source[src], video[src], a[href], img, #main-content",
+        )
         val photos = photoAnchors(doc)
 
         val derived = photos.mapNotNull { anchor ->
             anchor.selectFirst("img")?.absSrc()?.replace(sizePrefixRegex, "/")
         }.filter { it.isNotBlank() }.distinct().reversed()
 
-        val urls = if (derived.isNotEmpty()) {
-            derived
-        } else {
-            photos.mapNotNull { anchor ->
-                runCatching {
-                    val body = client.get(anchor.absHref(), Fetch.DOCUMENT).body.string()
-                    contentUrlRegex.find(body)?.groupValues?.get(1)
-                }.getOrNull()
-            }.distinct().reversed()
+        if (derived.isNotEmpty()) {
+            return derived.mapIndexed { index, url -> Page(index, imageUrl = url) }
         }
 
-        return urls.mapIndexed { index, url -> Page(index, imageUrl = url) }
+        val videos = extractDirectVideos(doc)
+        if (videos.isNotEmpty()) {
+            throw Exception(
+                "Capítulo de video (no reproducible en el visor de imágenes). Enlace directo:\n${videos.first()}",
+            )
+        }
+
+        val fallbackUrls = photos.mapNotNull { anchor ->
+            runCatching {
+                val body = client.get(anchor.absHref(), Fetch.DOCUMENT).body.string()
+                contentUrlRegex.find(body)?.groupValues?.get(1)
+            }.getOrNull()
+        }.distinct().reversed()
+
+        return fallbackUrls.mapIndexed { index, url -> Page(index, imageUrl = url) }
+    }
+
+    private fun extractDirectVideos(doc: Document): List<String> {
+        val viewer = doc.selectFirst("[data-file-viewer=\"true\"]") ?: doc
+        val player = viewer.selectFirst("[data-file-player=\"true\"]") ?: viewer
+
+        val candidates = buildList {
+            player.select("video[src]").forEach { el ->
+                val src = el.attr("src").trim()
+                if (src.isNotBlank()) add(absolutize(src))
+            }
+            player.select("video source[src], source[type*=\"video\"][src]").forEach { el ->
+                val src = el.attr("src").trim()
+                if (src.isNotBlank()) add(absolutize(src))
+            }
+            doc.select("script[type=\"application/ld+json\"]").forEach { ldJson ->
+                val raw = ldJson.data()
+                contentUrlRegex.findAll(raw).forEach { match ->
+                    add(absolutize(match.groupValues[1].replace("\\/", "/")))
+                }
+                mediaUrlRegex.findAll(raw).forEach { match ->
+                    add(absolutize(match.value.replace("\\/", "/")))
+                }
+            }
+            mediaUrlRegex.findAll(player.outerHtml()).forEach { match ->
+                add(absolutize(match.value.replace("\\/", "/")))
+            }
+        }
+
+        return candidates
+            .map { it.substringBefore('#') }
+            .filter { it.isNotBlank() && !it.startsWith("blob:") }
+            .distinct()
     }
 
     private fun photoAnchors(doc: Document): List<Element> {
