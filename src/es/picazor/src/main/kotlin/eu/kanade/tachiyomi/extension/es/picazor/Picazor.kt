@@ -194,7 +194,7 @@ class Picazor : HttpSource() {
     private fun parseSpanishDate(text: String): Long {
         val match = spanishDateRegex.find(text) ?: return 0L
         val (day, month, year) = match.destructured
-        return runCatching { dateFormat.parse("$day de $month de$year")?.time ?: 0L }.getOrDefault(0L)
+        return runCatching { dateFormat.parse("$day de $month de $year")?.time ?: 0L }.getOrDefault(0L)
     }
 
     // ------------------------------------------------------------------- Páginas
@@ -246,4 +246,11 @@ class Picazor : HttpSource() {
 
     private fun Element.absSrc(): String = absolutize(attr("src"))
 
-    private fun absolutize(value:
+    private fun absolutize(value: String): String = when {
+        value.isBlank() -> ""
+        value.startsWith("http") -> value
+        value.startsWith("//") -> "https:$value"
+        value.startsWith("/") -> baseUrl + value
+        else -> "$baseUrl/$value"
+    }
+}
